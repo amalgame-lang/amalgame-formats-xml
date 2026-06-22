@@ -1,0 +1,394 @@
+namespace Amalgame.Formats.Xml
+
+import Amalgame.Collections
+import Amalgame.String
+
+// ═══════════════════════════════════════════════════════
+//  xml.am  —  namespace-aware, read-only XML reader
+// ═══════════════════════════════════════════════════════
+//
+// Parses an XML document into a tree of `XmlNode` elements.
+// Built for protocol payloads — WebDAV / CalDAV / CardDAV request
+// bodies, SOAP-ish envelopes, small config — where the consumer
+// matches elements by **resolved namespace URI + local name**,
+// independent of whatever prefix the sender chose (`<D:href>`,
+// `<d:href>` and a default-namespaced `<href>` all compare equal
+// once the namespace is resolved).
+//
+// Coverage:
+//   - Elements (open / close / self-closing), arbitrary nesting
+//   - Attributes (single- or double-quoted)
+//   - Namespace declarations: `xmlns="…"` (default) and
+//     `xmlns:prefix="…"`, scoped to the declaring subtree
+//   - Text content + CDATA sections (`<![CDATA[ … ]]>`)
+//   - The five predefined entities (&amp; &lt; &gt; &quot; &apos;)
+//   - Skips the XML declaration, comments, processing
+//     instructions and the DOCTYPE
+//
+// Out of scope (v0.1.0):
+//   - Numeric character references (`&#65;` / `&#x41;`) — left
+//     verbatim; protocol control XML uses the named entities
+//   - DTD-defined entities, validation, mixed-content ordering
+//     (text and child order is not preserved relative to each
+//     other — text is concatenated onto the element)
+//
+// API sketch:
+//   let root: XmlNode = Xml.Parse(body)
+//   let dav:  string  = "DAV:"
+//   let mg:   XmlNode = root.Find(dav, "calendar-multiget")  // or root itself
+//   let hrefs: List<XmlNode> = root.All(dav, "href")
+//   for h in 0..hrefs.Count() {
+//       let node: XmlNode = hrefs.Get(h)
+//       let url:  string  = node.Text()
+//   }
+
+public class XmlNode {
+    public  Ns:    string              // resolved namespace URI ("" = none)
+    public  Name:  string              // local name (prefix stripped)
+    private AKeys: List<string>        // attribute local names
+    private AVals: List<string>        // attribute values, parallel to AKeys
+    private Kids:  List<XmlNode>       // child elements
+    private Txt:   string              // concatenated direct text content
+    private Valid: bool                // false = the "not found" sentinel
+
+    public XmlNode() {
+        this.Ns    = ""
+        this.Name  = ""
+        this.AKeys = new List<string>()
+        this.AVals = new List<string>()
+        this.Kids  = new List<XmlNode>()
+        this.Txt   = ""
+        this.Valid = true
+    }
+
+    // The sentinel returned by Find/First when nothing matches, so
+    // callers can chain `if (n.IsNull())` instead of null-checking.
+    public static XmlNode Nil() {
+        let x: XmlNode = new XmlNode()
+        x.Valid = false
+        return x
+    }
+
+    // ── Identity ──────────────────────────────────────
+    public bool   IsNull()    { return !this.Valid }
+    public string Local()     { return this.Name }
+    public string Namespace() { return this.Ns }
+
+    // {ns}local equality — prefix-agnostic element matching.
+    public bool Is(string ns, string local) {
+        if (!this.Valid) { return false }
+        return this.Ns == ns && this.Name == local
+    }
+
+    // ── Text ──────────────────────────────────────────
+    // Direct text content (CDATA + character data), entity-decoded.
+    public string Text() { return this.Txt }
+    // Convenience: text with leading/trailing whitespace removed.
+    public string TextTrimmed() { return String_Trim(this.Txt) }
+
+    // ── Attributes ────────────────────────────────────
+    // Attributes are looked up by LOCAL name. Per the XML spec an
+    // unprefixed attribute has no namespace, so prefixes (other than
+    // the reserved xmlns) are stripped and the local name is keyed.
+    public bool HasAttr(string local) {
+        let n: int = this.AKeys.Count()
+        for i in 0..n {
+            let k: string = this.AKeys.Get(i)
+            if (k == local) { return true }
+        }
+        return false
+    }
+    public string Attr(string local) {
+        let n: int = this.AKeys.Count()
+        for i in 0..n {
+            let k: string = this.AKeys.Get(i)
+            if (k == local) { return this.AVals.Get(i) }
+        }
+        return ""
+    }
+    public int AttrCount() { return this.AKeys.Count() }
+
+    // ── Children ──────────────────────────────────────
+    public List<XmlNode> Children() { return this.Kids }
+    public int ChildCount() { return this.Kids.Count() }
+    public XmlNode ChildAt(int i) {
+        if (i < 0 || i >= this.Kids.Count()) { return XmlNode.Nil() }
+        return this.Kids.Get(i)
+    }
+
+    // First DIRECT child matching {ns}local; Nil node if none.
+    public XmlNode First(string ns, string local) {
+        let n: int = this.Kids.Count()
+        for i in 0..n {
+            let c: XmlNode = this.Kids.Get(i)
+            if (c.Ns == ns && c.Name == local) { return c }
+        }
+        return XmlNode.Nil()
+    }
+    // All DIRECT children matching {ns}local (in document order).
+    public List<XmlNode> All(string ns, string local) {
+        let out: List<XmlNode> = new List<XmlNode>()
+        let n: int = this.Kids.Count()
+        for i in 0..n {
+            let c: XmlNode = this.Kids.Get(i)
+            if (c.Ns == ns && c.Name == local) { out.Add(c) }
+        }
+        return out
+    }
+    // First DESCENDANT (depth-first) matching {ns}local; Nil if none.
+    // Includes `this` so `root.Find(...)` finds a self-match.
+    public XmlNode Find(string ns, string local) {
+        if (this.Valid && this.Ns == ns && this.Name == local) { return this }
+        let n: int = this.Kids.Count()
+        for i in 0..n {
+            let c: XmlNode = this.Kids.Get(i)
+            let hit: XmlNode = c.Find(ns, local)
+            if (!hit.IsNull()) { return hit }
+        }
+        return XmlNode.Nil()
+    }
+
+    // ── Builders (used by the parser) ─────────────────
+    public void SetName(string ns, string local) { this.Ns = ns; this.Name = local }
+    public void AddAttr(string k, string v)       { this.AKeys.Add(k); this.AVals.Add(v) }
+    public void AddKid(XmlNode c)                 { this.Kids.Add(c) }
+    public void AppendText(string t)              { this.Txt = this.Txt + t }
+}
+
+// ── Entry point ───────────────────────────────────────
+public class Xml {
+    // Parse an XML document → root XmlNode. Returns a Nil node when
+    // the input has no element (empty / prolog-only / malformed root).
+    public static XmlNode Parse(string src) {
+        let p: XmlParser = new XmlParser(src)
+        return p.ParseDocument()
+    }
+
+    // Decode the five predefined XML entities. `&amp;` is decoded
+    // LAST so an escaped entity like `&amp;lt;` round-trips to the
+    // literal text `&lt;` rather than collapsing to `<`.
+    public static string DecodeEntities(string s) {
+        if (!String_Contains(s, "&")) { return s }
+        var r: string = s
+        r = String_Replace(r, "&lt;",   "<")
+        r = String_Replace(r, "&gt;",   ">")
+        r = String_Replace(r, "&quot;", "\"")
+        r = String_Replace(r, "&apos;", "'")
+        r = String_Replace(r, "&amp;",  "&")
+        return r
+    }
+}
+
+// ── Parser ────────────────────────────────────────────
+public class XmlParser {
+    private S:   string
+    private Pos: int
+    private N:   int
+
+    public XmlParser(src: string) {
+        this.S   = src
+        this.Pos = 0
+        this.N   = String_Length(src)
+    }
+
+    public XmlNode ParseDocument() {
+        this.skipMisc()
+        if (this.Pos >= this.N)   { return XmlNode.Nil() }
+        if (this.cur() != "<")    { return XmlNode.Nil() }
+        let scope: Map<string, string> = new Map<string, string>()
+        return this.parseElement(scope)
+    }
+
+    // ── Character helpers ─────────────────────────────
+    private string cur() {
+        if (this.Pos >= this.N) { return "" }
+        return String_Substring(this.S, this.Pos, 1)
+    }
+    private bool startsWith(string m) {
+        let ml: int = String_Length(m)
+        if (this.Pos + ml > this.N) { return false }
+        return String_Substring(this.S, this.Pos, ml) == m
+    }
+    private void skipWs() {
+        while (this.Pos < this.N) {
+            let c: string = String_Substring(this.S, this.Pos, 1)
+            if (c == " " || c == "\t" || c == "\n" || c == "\r") {
+                this.Pos = this.Pos + 1
+            } else {
+                return
+            }
+        }
+    }
+    // Advance past the next occurrence of `marker` (inclusive).
+    private void skipPast(string marker) {
+        let idx: int = this.indexFrom(marker, this.Pos)
+        if (idx < 0) { this.Pos = this.N; return }
+        this.Pos = idx + String_Length(marker)
+    }
+    // First index of `sub` at or after `from`, or -1.
+    private int indexFrom(string sub, int from) {
+        if (from < 0) { from = 0 }
+        if (from >= this.N) { return -1 }
+        let tail: string = String_Substring(this.S, from, this.N - from)
+        let rel: int = String_IndexOf(tail, sub)
+        if (rel < 0) { return -1 }
+        return from + rel
+    }
+
+    // true for chars allowed in element / attribute names.
+    private bool isNameChar(string c) {
+        if (c == "")  { return false }
+        if (c == " " || c == "\t" || c == "\n" || c == "\r") { return false }
+        if (c == ">" || c == "/" || c == "=" || c == "<") { return false }
+        return true
+    }
+    private string readName() {
+        let start: int = this.Pos
+        while (this.Pos < this.N) {
+            let c: string = String_Substring(this.S, this.Pos, 1)
+            if (!this.isNameChar(c)) { break }
+            this.Pos = this.Pos + 1
+        }
+        return String_Substring(this.S, start, this.Pos - start)
+    }
+    // Read a quoted attribute value (entity-decoded). Pos is on the
+    // opening quote. Returns "" and leaves Pos if not a quote.
+    private string readAttValue() {
+        let q: string = this.cur()
+        if (q != "\"" && q != "'") { return "" }
+        let start: int = this.Pos + 1
+        let close: int = this.indexFrom(q, start)
+        if (close < 0) { this.Pos = this.N; return "" }
+        let raw: string = String_Substring(this.S, start, close - start)
+        this.Pos = close + 1
+        return Xml.DecodeEntities(raw)
+    }
+
+    // Skip prolog noise before the root element.
+    private void skipMisc() {
+        var go: bool = true
+        while (go) {
+            this.skipWs()
+            if (this.startsWith("<?"))        { this.skipPast("?>") }
+            else if (this.startsWith("<!--")) { this.skipPast("-->") }
+            else if (this.startsWith("<!"))   { this.skipPast(">") }
+            else                              { go = false }
+        }
+    }
+
+    private string prefixOf(string qname) {
+        let i: int = String_IndexOf(qname, ":")
+        if (i < 0) { return "" }
+        return String_Substring(qname, 0, i)
+    }
+    private string localOf(string qname) {
+        let i: int = String_IndexOf(qname, ":")
+        if (i < 0) { return qname }
+        return String_Substring(qname, i + 1, String_Length(qname) - i - 1)
+    }
+    private Map<string, string> copyScope(Map<string, string> src) {
+        let out: Map<string, string> = new Map<string, string>()
+        let keys: List<string> = src.Keys()
+        let n: int = keys.Count()
+        for i in 0..n {
+            let k: string = keys.Get(i)
+            out.Set(k, src.Get(k))
+        }
+        return out
+    }
+    private string resolveNs(Map<string, string> scope, string prefix) {
+        if (scope.Has(prefix)) { return scope.Get(prefix) }
+        return ""
+    }
+
+    // Parse one element. Precondition: cur() == "<" and the next
+    // char begins a name. Returns the built node (Pos left just past
+    // the element's end tag or self-closing ">").
+    private XmlNode parseElement(Map<string, string> parentScope) {
+        this.Pos = this.Pos + 1            // consume '<'
+        let qname: string = this.readName()
+
+        let scope: Map<string, string> = this.copyScope(parentScope)
+        let akeys: List<string> = new List<string>()
+        let avals: List<string> = new List<string>()
+        var selfClose: bool = false
+
+        // attributes / xmlns declarations
+        var loop: bool = true
+        while (loop) {
+            this.skipWs()
+            let c: string = this.cur()
+            if (c == "") { loop = false }
+            else if (c == ">") { this.Pos = this.Pos + 1; loop = false }
+            else if (c == "/") {
+                this.Pos = this.Pos + 1
+                if (this.cur() == ">") { this.Pos = this.Pos + 1 }
+                selfClose = true
+                loop = false
+            } else {
+                let an: string = this.readName()
+                if (an == "") { this.Pos = this.Pos + 1 }   // resync on junk
+                else {
+                    this.skipWs()
+                    var av: string = ""
+                    if (this.cur() == "=") {
+                        this.Pos = this.Pos + 1
+                        this.skipWs()
+                        av = this.readAttValue()
+                    }
+                    if (an == "xmlns") {
+                        scope.Set("", av)
+                    } else if (String_StartsWith(an, "xmlns:")) {
+                        let pfx: string = String_Substring(an, 6, String_Length(an) - 6)
+                        scope.Set(pfx, av)
+                    } else {
+                        akeys.Add(this.localOf(an))
+                        avals.Add(av)
+                    }
+                }
+            }
+        }
+
+        let node: XmlNode = new XmlNode()
+        let epfx: string = this.prefixOf(qname)
+        node.SetName(this.resolveNs(scope, epfx), this.localOf(qname))
+        let na: int = akeys.Count()
+        for i in 0..na {
+            node.AddAttr(akeys.Get(i), avals.Get(i))
+        }
+        if (selfClose) { return node }
+
+        this.parseContent(node, scope)
+        return node
+    }
+
+    // Consume children + text until the matching end tag.
+    private void parseContent(XmlNode node, Map<string, string> scope) {
+        var loop: bool = true
+        while (loop && this.Pos < this.N) {
+            if (this.startsWith("</")) {
+                this.skipPast(">")             // end tag — consume whole </name>
+                loop = false
+            } else if (this.startsWith("<!--")) {
+                this.skipPast("-->")
+            } else if (this.startsWith("<![CDATA[")) {
+                let start: int = this.Pos + 9
+                let end: int = this.indexFrom("]]>", start)
+                if (end < 0) { node.AppendText(String_Substring(this.S, start, this.N - start)); this.Pos = this.N }
+                else { node.AppendText(String_Substring(this.S, start, end - start)); this.Pos = end + 3 }
+            } else if (this.startsWith("<?")) {
+                this.skipPast("?>")
+            } else if (this.cur() == "<") {
+                let child: XmlNode = this.parseElement(scope)
+                node.AddKid(child)
+            } else {
+                let lt: int = this.indexFrom("<", this.Pos)
+                let end: int = lt
+                if (end < 0) { end = this.N }
+                let raw: string = String_Substring(this.S, this.Pos, end - this.Pos)
+                node.AppendText(Xml.DecodeEntities(raw))
+                this.Pos = end
+            }
+        }
+    }
+}

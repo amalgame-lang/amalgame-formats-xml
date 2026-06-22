@@ -1,0 +1,147 @@
+// Test suite for amalgame-formats-xml — namespace-aware XML reader.
+//
+// Style note (same gotcha as the JSON/YAML facades): every
+// method-call result is pulled into a typed local before calling
+// another method on it. Chained access like
+//   root.First(ns,"x").Local()
+// lowers to a void-typed intermediate in --external mode, so we
+// spell out each step.
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.Formats.Xml
+
+public class Program {
+    public static void Main(string[] args) {
+        let DAV: string = "DAV:"
+
+        // ── 1. empty → nil ───────────────────────────────
+        let empty: XmlNode = Xml.Parse("")
+        if (empty.IsNull()) { Console.WriteLine("[PASS] parse empty") }
+        else                { Console.WriteLine("[FAIL] parse empty") }
+
+        // ── 2. single root local name ────────────────────
+        let r2: XmlNode = Xml.Parse("<doc/>")
+        let r2name: string = r2.Local()
+        if (r2name == "doc") { Console.WriteLine("[PASS] single root local") }
+        else                 { Console.WriteLine("[FAIL] single root local: " + r2name) }
+
+        // ── 3. default namespace ─────────────────────────
+        let r3: XmlNode = Xml.Parse("<doc xmlns=\"DAV:\"/>")
+        let r3ns: string = r3.Namespace()
+        if (r3ns == DAV) { Console.WriteLine("[PASS] default namespace") }
+        else             { Console.WriteLine("[FAIL] default namespace: " + r3ns) }
+
+        // ── 4. prefixed namespace ────────────────────────
+        let r4: XmlNode = Xml.Parse("<D:doc xmlns:D=\"DAV:\"/>")
+        let r4ns: string = r4.Namespace()
+        let r4lc: string = r4.Local()
+        if (r4ns == DAV && r4lc == "doc") { Console.WriteLine("[PASS] prefix namespace") }
+        else { Console.WriteLine("[FAIL] prefix namespace: " + r4ns + " " + r4lc) }
+
+        // ── 5. prefix-agnostic match (prefixed vs default) ─
+        let a5: XmlNode = Xml.Parse("<D:multistatus xmlns:D=\"DAV:\"/>")
+        let b5: XmlNode = Xml.Parse("<multistatus xmlns=\"DAV:\"/>")
+        let a5ok: bool = a5.Is(DAV, "multistatus")
+        let b5ok: bool = b5.Is(DAV, "multistatus")
+        if (a5ok && b5ok) { Console.WriteLine("[PASS] prefix-agnostic match") }
+        else { Console.WriteLine("[FAIL] prefix-agnostic match") }
+
+        // ── 6. attribute value ───────────────────────────
+        let r6: XmlNode = Xml.Parse("<doc id=\"42\" name='x'/>")
+        let r6id: string = r6.Attr("id")
+        let r6nm: string = r6.Attr("name")
+        if (r6id == "42" && r6nm == "x") { Console.WriteLine("[PASS] attribute value") }
+        else { Console.WriteLine("[FAIL] attribute value: " + r6id + " " + r6nm) }
+
+        // ── 7. nested First ──────────────────────────────
+        let r7: XmlNode = Xml.Parse("<a xmlns=\"DAV:\"><b/></a>")
+        let r7b: XmlNode = r7.First(DAV, "b")
+        let r7null: bool = r7b.IsNull()
+        let r7lc: string = r7b.Local()
+        if (!r7null && r7lc == "b") { Console.WriteLine("[PASS] nested first") }
+        else { Console.WriteLine("[FAIL] nested first") }
+
+        // ── 8. All children count ────────────────────────
+        let r8: XmlNode = Xml.Parse("<a xmlns=\"DAV:\"><x/><x/><y/></a>")
+        let r8x: List<XmlNode> = r8.All(DAV, "x")
+        let r8n: int = r8x.Count()
+        if (r8n == 2) { Console.WriteLine("[PASS] all children count") }
+        else { Console.WriteLine("[FAIL] all children count: " + String_FromInt(r8n)) }
+
+        // ── 9. text content ──────────────────────────────
+        let r9: XmlNode = Xml.Parse("<a>hello world</a>")
+        let r9t: string = r9.Text()
+        if (r9t == "hello world") { Console.WriteLine("[PASS] text content") }
+        else { Console.WriteLine("[FAIL] text content: " + r9t) }
+
+        // ── 10. entity decode ────────────────────────────
+        let r10: XmlNode = Xml.Parse("<a>1 &lt; 2 &amp; 3 &gt; 0</a>")
+        let r10t: string = r10.Text()
+        if (r10t == "1 < 2 & 3 > 0") { Console.WriteLine("[PASS] entity decode") }
+        else { Console.WriteLine("[FAIL] entity decode: " + r10t) }
+
+        // ── 11. amp-last (escaped entity round-trips) ────
+        let r11: XmlNode = Xml.Parse("<a>&amp;lt;</a>")
+        let r11t: string = r11.Text()
+        if (r11t == "&lt;") { Console.WriteLine("[PASS] amp-last decode") }
+        else { Console.WriteLine("[FAIL] amp-last decode: " + r11t) }
+
+        // ── 12. CDATA preserved verbatim ─────────────────
+        let r12: XmlNode = Xml.Parse("<a><![CDATA[<b>raw & stuff</b>]]></a>")
+        let r12t: string = r12.Text()
+        if (r12t == "<b>raw & stuff</b>") { Console.WriteLine("[PASS] cdata") }
+        else { Console.WriteLine("[FAIL] cdata: " + r12t) }
+
+        // ── 13. self-closing child ───────────────────────
+        let r13: XmlNode = Xml.Parse("<a xmlns=\"DAV:\"><b/></a>")
+        let r13n: int = r13.ChildCount()
+        if (r13n == 1) { Console.WriteLine("[PASS] self-closing") }
+        else { Console.WriteLine("[FAIL] self-closing: " + String_FromInt(r13n)) }
+
+        // ── 14. Find descendant (depth-first) ────────────
+        let r14: XmlNode = Xml.Parse("<a xmlns=\"DAV:\"><b><c/></b></a>")
+        let r14c: XmlNode = r14.Find(DAV, "c")
+        let r14null: bool = r14c.IsNull()
+        let r14lc: string = r14c.Local()
+        if (!r14null && r14lc == "c") { Console.WriteLine("[PASS] find descendant") }
+        else { Console.WriteLine("[FAIL] find descendant") }
+
+        // ── 15. missing First → nil ──────────────────────
+        let r15: XmlNode = Xml.Parse("<a xmlns=\"DAV:\"><b/></a>")
+        let r15z: XmlNode = r15.First(DAV, "zzz")
+        let r15null: bool = r15z.IsNull()
+        if (r15null) { Console.WriteLine("[PASS] missing first is nil") }
+        else { Console.WriteLine("[FAIL] missing first is nil") }
+
+        // ── 16. skip prolog + comment ────────────────────
+        let r16: XmlNode = Xml.Parse("<?xml version=\"1.0\" encoding=\"utf-8\"?><!-- hi --><doc/>")
+        let r16lc: string = r16.Local()
+        if (r16lc == "doc") { Console.WriteLine("[PASS] skip prolog") }
+        else { Console.WriteLine("[FAIL] skip prolog: " + r16lc) }
+
+        // ── 17. realistic CalDAV calendar-multiget body ──
+        let body: string = "<?xml version=\"1.0\"?>"
+            + "<C:calendar-multiget xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\">"
+            + "<D:prop><D:getetag/><C:calendar-data/></D:prop>"
+            + "<D:href>/cal/a.ics</D:href>"
+            + "<D:href>/cal/b.ics</D:href>"
+            + "</C:calendar-multiget>"
+        let mg: XmlNode = Xml.Parse(body)
+        let cal: string = "urn:ietf:params:xml:ns:caldav"
+        let isMg: bool = mg.Is(cal, "calendar-multiget")
+        let hrefs: List<XmlNode> = mg.All(DAV, "href")
+        let hc: int = hrefs.Count()
+        var firstHref: string = ""
+        if (hc > 0) {
+            let h0: XmlNode = hrefs.Get(0)
+            firstHref = h0.Text()
+        }
+        if (isMg && hc == 2 && firstHref == "/cal/a.ics") {
+            Console.WriteLine("[PASS] webdav multiget hrefs")
+        } else {
+            Console.WriteLine("[FAIL] webdav multiget hrefs: " + String_FromInt(hc) + " " + firstHref)
+        }
+    }
+}

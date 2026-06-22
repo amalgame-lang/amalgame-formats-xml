@@ -1,0 +1,29 @@
+# Package manifest — amalgame-formats-xml
+#
+# Pure-Amalgame, namespace-aware, read-only XML reader. Parses a
+# document into a tree of `XmlNode` elements that consumers match by
+# resolved {namespace-URI}local-name — prefix-agnostic, the way
+# WebDAV / CalDAV / CardDAV / SOAP payloads need.
+#
+# Out of scope: numeric character references, DTD entities,
+# validation, serialization (output is the caller's job).
+#
+# Installation:
+#
+#   amc package add formats-xml                # via curated index
+#   amc package add github.com/amalgame-lang/amalgame-formats-xml@v0.1.0
+
+[package]
+name              = "amalgame-formats-xml"
+version           = "0.1.0"
+license           = "Apache-2.0"
+description       = "Pure-Amalgame namespace-aware XML reader: elements, attributes, xmlns scoping, CDATA, predefined entities — match by {namespace}local."
+authors           = ["Bastien Mouget"]
+required-amalgame = ">=0.7.7"
+schema-version    = 1
+
+[stdlib]
+class     = "Xml"
+header    = "facade-stub.h"
+namespace = "Amalgame.Formats.Xml"
+facade    = "facade.am"
