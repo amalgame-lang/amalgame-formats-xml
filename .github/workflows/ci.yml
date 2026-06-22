@@ -42,7 +42,7 @@ jobs:
           # v0.8.x release layout: bin/amc + share/amalgame/runtime
           # (v0.7.x was flat). Locate both robustly.
           AMC_BIN="$(find $RUNNER_TEMP/amc-install -name amc -type f | head -1)"
-          AMC_RT="$(dirname "$(find $RUNNER_TEMP/amc-install -name 'Amalgame_GC.h' | head -1)")"
+          AMC_RT="$(dirname "$(find $RUNNER_TEMP/amc-install -name '_runtime.h' | head -1)")"
           echo "AMC=$AMC_BIN" >> $GITHUB_ENV
           echo "AMC_RUNTIME=$AMC_RT" >> $GITHUB_ENV
 
